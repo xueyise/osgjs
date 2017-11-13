@@ -27,9 +27,9 @@ import UpdateMatrixTransform from 'osgAnimation/UpdateMatrixTransform';
 import FileHelper from 'osgDB/FileHelper';
 
 import Uniform from 'osg/Uniform';
-import { vec3 } from 'osg/glMatrix';
-import { quat } from 'osg/glMatrix';
-import { mat4 } from 'osg/glMatrix';
+import {vec3} from 'osg/glMatrix';
+import {quat} from 'osg/glMatrix';
+import {mat4} from 'osg/glMatrix';
 
 var ReaderWriterGLTF = function() {
     // Contains all the needed glTF files (.gltf, .bin, etc...)
@@ -386,12 +386,16 @@ ReaderWriterGLTF.prototype = {
         });
     },
 
-    buildInfluenceMap: function(rootBoneId, skin) {
-        if (this._skeletonToInfluenceMap[rootBoneId]) return;
-        this._skeletonToInfluenceMap[rootBoneId] = {};
+    buildInfluenceMap: function(skin, skinId) {
+        var skeletonToInfluenceMap = this._skeletonToInfluenceMap[skinId];
+        if (!skeletonToInfluenceMap) {
+            skeletonToInfluenceMap = {};
+            this._skeletonToInfluenceMap[skinId] = skeletonToInfluenceMap;
+        }
+
         for (var j = 0; j < skin.joints.length; j++) {
             var jointName = skin.joints[j];
-            this._skeletonToInfluenceMap[rootBoneId][jointName] = j;
+            skeletonToInfluenceMap[jointName] = j;
         }
     },
 
@@ -427,7 +431,7 @@ ReaderWriterGLTF.prototype = {
         for (var i = 0; i < nodesKeys.length; ++i) {
             var boneId = nodesKeys[i];
             var boneNode = json.nodes[boneId];
-            if (!boneNode.jointName) continue;
+            if (!boneNode.jointName || bonesToSkin[boneId] === undefined) continue;
             var bonePromise = this.loadBone(boneId, bonesToSkin[boneId]);
             promises.push(bonePromise);
         }
@@ -449,28 +453,21 @@ ReaderWriterGLTF.prototype = {
             if (!node.skeletons) continue;
 
             for (var i = 0; i < node.skeletons.length; ++i) {
-                var rootBoneId = null;
-                var rootJointId = node.skeletons[i];
-                for (var k = 0; k < nodesKeys.length; ++k) {
-                    var subnodeId = nodesKeys[k];
-                    var subnode = json.nodes[subnodeId];
-                    if (!subnode.jointName) continue;
-                    var rootJoint = json.nodes[rootJointId];
-                    if (subnode.jointName === rootJoint.jointName) {
-                        rootBoneId = subnodeId;
-                        break;
-                    }
-                }
+                var rootBoneId = node.skeletons[i];
                 if (rootBoneId && !this._skeletons[rootBoneId]) {
-                    this._skeletons[rootJointId] = new Skeleton();
+                    this._skeletons[rootBoneId] = new Skeleton();
+                    this._skeletons[rootBoneId].setName(rootBoneId);
+                    this._bindShapeMatrices[rootBoneId] = skin.bindShapeMatrix;
                     // Adds missing bone to the boneMap
                     bonesToSkin[rootBoneId] = skin;
+
+                    for (var k = 0; k < skin.jointNames.length; ++k) {
+                        this._boneToSkeleton[skin.jointNames[k]] = rootBoneId;
+                    }
                 }
-                this.buildInfluenceMap(rootJointId, skin);
+                this.buildInfluenceMap(skin, node.skin);
             }
         }
-
-        return this.preprocessBones(bonesToSkin);
     }),
 
     loadPBRMaterial: P.method(function(materialId, glTFmaterial, geometryNode, extension) {
@@ -646,7 +643,7 @@ ReaderWriterGLTF.prototype = {
         return;
     }),
 
-    createGeometry: function(primitive, skeletonJointId) {
+    createGeometry: function(primitive, skeletonJointId, skinId) {
         var json = this._glTFJSON;
         var promisesArray = [];
 
@@ -660,9 +657,9 @@ ReaderWriterGLTF.prototype = {
             this.getVertexAttributeList()[name] = buffer;
         };
 
-        if (skeletonJointId) {
+        if (skinId) {
             rigOrGeom = new RigGeometry();
-            rigOrGeom._boneNameID = this._skeletonToInfluenceMap[skeletonJointId];
+            rigOrGeom._boneNameID = this._skeletonToInfluenceMap[skinId];
         }
 
         var attributeWeight = function(data) {
@@ -725,19 +722,34 @@ ReaderWriterGLTF.prototype = {
         if (primitive.material !== undefined)
             promisesArray.push(this.loadMaterial(primitive.material, geom));
 
-        return P.all(promisesArray).then(function() {
-            if (skeletonJointId) {
-                rigOrGeom.setSourceGeometry(geom);
-                rigOrGeom.mergeChildrenData();
+        return P.all(promisesArray).then(
+            function() {
+                if (skeletonJointId) {
+                    rigOrGeom.setSourceGeometry(geom);
+                    rigOrGeom.mergeChildrenData();
+                    this.applyBindShapeMatrix(rigOrGeom, skeletonJointId);
+                    rigOrGeom.computeBoundingBox = geom.computeBoundingBox;
+                }
 
-                rigOrGeom.computeBoundingBox = geom.computeBoundingBox;
-            }
-
-            return rigOrGeom;
-        });
+                return rigOrGeom;
+            }.bind(this)
+        );
     },
 
-    loadGLTFPrimitives: function(meshId, resultMeshNode, skeletonJointId) {
+    applyBindShapeMatrix: function(rigGeom, skeletonJointId) {
+        var bindShape = this._bindShapeMatrices[skeletonJointId];
+        var elts = rigGeom.getVertexAttributeList()['Vertex'].getElements();
+        var v = vec3.create();
+        for (var i = 0; i < elts.length; i += 3) {
+            v.set([elts[i], elts[i + 1], elts[i + 2]]);
+            vec3.transformMat4(v, v, bindShape);
+            elts[i] = v[0];
+            elts[i + 1] = v[1];
+            elts[i + 2] = v[2];
+        }
+    },
+
+    loadGLTFPrimitives: function(meshId, resultMeshNode, skeletonJointId, skinId) {
         var json = this._glTFJSON;
         var mesh = json.meshes[meshId];
 
@@ -747,7 +759,7 @@ ReaderWriterGLTF.prototype = {
         var i;
         for (i = 0; i < primitives.length; ++i) {
             var primitive = primitives[i];
-            var promiseGeom = this.createGeometry(primitive, skeletonJointId);
+            var promiseGeom = this.createGeometry(primitive, skeletonJointId, skinId);
 
             promisesArray.push(promiseGeom);
         }
@@ -760,19 +772,28 @@ ReaderWriterGLTF.prototype = {
     },
 
     loadGLTFNode: P.method(function(nodeId, root) {
-        if (this._visitedNodes[nodeId]) return;
+        if (this._visitedNodes[nodeId]) return undefined;
 
         var json = this._glTFJSON;
         var glTFNode = json.nodes[nodeId];
+        var currentNode;
 
-        var currentNode = glTFNode.jointName ? this._bones[nodeId] : new MatrixTransform();
-        currentNode.setName(nodeId);
-        mat4.copy(currentNode.getMatrix(), this.loadTransform(glTFNode));
+        if (glTFNode.jointName) {
+            currentNode = this._bones[nodeId];
+        } else {
+            currentNode = new MatrixTransform();
+        }
 
-        if (glTFNode.jointName && this._skeletons[glTFNode.joinName]) {
-            var skeleton = this._skeletons[glTFNode.jointName];
-            skeleton.addChild(currentNode);
-            root.addChild(skeleton);
+        if (this._skeletons[nodeId]) {
+            var skeleton = this._skeletons[nodeId];
+            if (currentNode.className && currentNode.className() !== 'Bone') {
+                currentNode.addChild(skeleton);
+                root.addChild(currentNode);
+                currentNode = skeleton;
+            } else {
+                skeleton.addChild(currentNode);
+                root.addChild(skeleton);
+            }
         }
 
         // Recurses on children before
@@ -791,27 +812,34 @@ ReaderWriterGLTF.prototype = {
         if (glTFNode.mesh !== undefined) {
             var meshId = glTFNode.mesh;
             if (!glTFNode.skeletons) {
-                var geomPromise = this.loadGLTFPrimitives(meshId, currentNode, null);
+                var geomPromise = this.loadGLTFPrimitives(meshId, currentNode);
                 promises.push(geomPromise);
             } else {
+                var geomP = this.loadGLTFPrimitives(
+                    meshId,
+                    currentNode,
+                    glTFNode.skeletons[0],
+                    glTFNode.skin
+                );
+                root.addChild(currentNode);
+                promises.push(geomP);
+                this._rigToSkeleton[nodeId] = [];
                 for (var j = 0; j < glTFNode.skeletons.length; ++j) {
                     var rootJointId = glTFNode.skeletons[j];
                     var skeletonNode = this._skeletons[rootJointId];
-                    var meshTransformNode = new MatrixTransform();
-                    mat4.copy(meshTransformNode.getMatrix(), currentNode.getMatrix());
-                    var geomP = this.loadGLTFPrimitives(meshId, meshTransformNode, rootJointId);
-                    skeletonNode.addChild(meshTransformNode);
-                    promises.push(geomP);
+
+                    this._rigToSkeleton[nodeId].push(skeletonNode);
+                    this._rigToRigNode[nodeId] = currentNode;
                 }
             }
         }
         // Loads solid animations
         // by adding an update callback
-        if (this._animatedNodes[nodeId]) this.registerUpdateCallback(nodeId, currentNode);
+        if ( this._animatedNodes[ nodeId ] || currentNode.className() === 'Bone' )
+            this.registerUpdateCallback(nodeId, currentNode, glTFNode);
 
         if (!this._skeletons[nodeId]) root.addChild(currentNode);
 
-        this._visitedNodes[nodeId] = true;
         return P.all(promises);
     }),
 
