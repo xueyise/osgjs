@@ -704,7 +704,8 @@
         createModelMaterialSample: function() {
             this._proxyModel = new osg.Node();
 
-            var request = osgDB.readNodeURL('../media/models/material-test/file.osgjs');
+            //var request = osgDB.readNodeURL('../media/models/material-test/file.osgjs');
+            var request = osgDB.readNodeURL('CesiumMan.gltf');
 
             request.then(
                 function(model) {

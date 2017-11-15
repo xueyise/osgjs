@@ -14,6 +14,7 @@ import channel from 'osgAnimation/channel';
 var createQuatChannel = channel.createQuatChannel;
 var createVec3Channel = channel.createVec3Channel;
 import BlendFunc from 'osg/BlendFunc';
+import notify from 'osg/notify';
 
 import Geometry from 'osg/Geometry';
 import Texture from 'osg/Texture';
@@ -47,6 +48,16 @@ var ReaderWriterGLTF = function() {
 
     this.init();
 };
+
+function base64ToArrayBuffer(base64) {
+    var binary_string =  window.atob(base64);
+    var len = binary_string.length;
+    var bytes = new Uint8Array( len );
+    for (var i = 0; i < len; i++)        {
+        bytes[i] = binary_string.charCodeAt(i);
+    }
+    return bytes.buffer;
+}
 
 ReaderWriterGLTF.WEBGL_COMPONENT_TYPES = {
     5120: Int8Array,
@@ -111,30 +122,125 @@ ReaderWriterGLTF.prototype = {
         this._inputReader = new Input();
     },
 
-    loadFile: P.method(function(uri) {
-        if (this._filesMap.has(uri)) return this._filesMap.get(uri);
+    loadBuffers: P.method(function() {
+        var promises = [];
+        var buffers = this._gltfJSON.buffers;
+        for (var i = 0; i < buffers.length; i++) {
+            var buffer = buffers[i];
+            if (buffer.uri) {
+                promises.push(
+                    this.loadURI(buffer.uri).then(function(arrayBuffer) {
+                        buffer.data = arrayBuffer;
+                    })
+                );
+            }
+        }
+        return P.all(promises);
+    }),
+
+    loadBufferViews: function() {
+        var buffers = this._gltfJSON.buffers;
+        var bufferViews = this._gltfJSON.buffers;
+        for (var i = 0; i < bufferViews.length; i++) {
+            var bufferView = bufferViews[i];
+            var bufferIndex = bufferView.buffer;
+            var bufferData = buffers[bufferIndex];
+            if (bufferData) {
+                var byteLength = bufferView.byteLength || 0;
+			          var byteOffset = bufferView.byteOffset || 0;
+                bufferView.data = bufferData.slice( byteOffset, byteOffset + byteLength );
+            }
+        }
+    },
+
+    loadAccessors: function() {
+        var bufferViews = this._gltfJSON.bufferViews;
+        var accessors = this._gltfJSON.accessors;
+        for (var i = 0; i < accessors.length; i++) {
+            var accessor = accessors[i];
+            var bufferViewIndex = accessor.bufferView;
+            var bufferView = bufferViews[bufferViewIndex];
+            if (bufferView.data) {
+
+                var itemSize = ReaderWriterGLTF.TYPE_TABLE[ accessor.type ];
+				        var TypedArray = ReaderWriterGLTF.WEBGL_COMPONENT_TYPES[ accessor.componentType ];
+
+				        // For VEC3: itemSize is 3, elementBytes is 4, itemBytes is 12.
+				        var elementBytes = TypedArray.BYTES_PER_ELEMENT;
+				        var itemBytes = elementBytes * itemSize;
+				        var byteStride = bufferView.byteStride;
+				        var normalized = accessor.normalized === true;
+                var bufferArray;
+
+				        // The buffer is not interleaved if the stride is the item size in bytes.
+				        if ( byteStride && byteStride !== itemBytes ) {
+
+					          // Use the full buffer if it's interleaved.
+                    notify.warn('GLTF interleaved accessors not supported');
+
+				        } else {
+
+					          var data = new TypedArray( bufferView, accessor.byteOffset, accessor.count * itemSize );
+                    bufferArray = new BufferArray( undefined, data, itemSize );
+                    bufferArray.setNormalize(normalized);
+
+				        }
+                accessor.data = bufferArray;
+            }
+        }
+    },
+
+    loadSkins: function() {
+        var accessors = this._gltfJSON.accessors;
+        var skins = this._gltfJSON.skins;
+        for (var i = 0; i < skins.length; i++) {
+            var bufferView = bufferViews[i];
+            var bufferIndex = bufferView.buffer;
+            var bufferData = buffers[bufferIndex];
+            if (bufferData) {
+                var byteLength = bufferView.byteLength || 0;
+			          var byteOffset = bufferView.byteOffset || 0;
+                bufferView.data = bufferData.slice( byteOffset, byteOffset + byteLength );
+            }
+        }
+    },
+
+    prepareBufferViews: function() {
+        var promises = [];
+        for (var i = 0; i < this._gltfJSON.bufferViews.length; i++) {
+            var bufferView = this._gltfJSON.bufferViews[i];
+            if (buffer.uri) {
+                promises.push(
+                    this.loadURI(buffer.uri).then(function(arrayBuffer) {
+                        buffer.data = arrayBuffer;
+                    })
+                );
+            }
+        }
+        return promises;
+    },
+
+    loadURI: P.method(function(uri) {
+        // is base64 inline data
+        if (uri.substr(0, 5) === 'data:') {
+            return base64ToArrayBuffer(uri);
+        }
 
         var ext = uri.substr(uri.lastIndexOf('.') + 1);
         var fileType = FileHelper.getTypeForExtension(ext);
 
-        var promiseFile;
         var url = this._localPath + uri;
         if (fileType === 'blob') {
-            promiseFile = this._inputReader.readImageURL(url, {
+            return this._inputReader.readImageURL(url, {
                 imageLoadingUsePromise: true
             });
         } else if (fileType === 'arraybuffer') {
-            promiseFile = this._inputReader.readBinaryArrayURL(url, {
+            return this._inputReader.readBinaryArrayURL(url, {
                 fileType: fileType
             });
         }
 
-        this._filesMap.set(uri, promiseFile);
-
-        promiseFile.then(function(file) {
-            return file;
-        });
-        return promiseFile;
+        return undefined;
     }),
 
     /**
@@ -835,7 +941,7 @@ ReaderWriterGLTF.prototype = {
         }
         // Loads solid animations
         // by adding an update callback
-        if ( this._animatedNodes[ nodeId ] || currentNode.className() === 'Bone' )
+        if (this._animatedNodes[nodeId] || currentNode.className() === 'Bone')
             this.registerUpdateCallback(nodeId, currentNode, glTFNode);
 
         if (!this._skeletons[nodeId]) root.addChild(currentNode);
@@ -865,25 +971,28 @@ ReaderWriterGLTF.prototype = {
     },
 
     readJSON: P.method(function(glTFFile, url) {
+        var json = JSON.parse(glTFFile);
+        if (!json) return undefined;
+
         // Creates the root node
-        // adding a PI / 2 rotation arround the X-axis
         var root = new MatrixTransform();
         root.setName(url);
 
-        var json = JSON.parse(glTFFile);
-        if (!json) return;
+        this._gltfJSON = json;
 
-        this._glTFJSON = json;
+        return this.loadBuffers().then( function() {
+            console.log(json);
+            return root;
+        });
 
-        var promisesArray = [];
         // Preprocesses animations
         var animPromise = this.preprocessAnimations();
+
         // Preprocesses skin animations if any
         var skeletonPromise = this.preprocessSkeletons();
 
-        promisesArray.push(skeletonPromise, animPromise);
         var self = this;
-        return P.all(promisesArray).then(function() {
+        return P.all([skeletonPromise, animPromise]).then(function() {
             var promises = [];
             // Loops through each scene
             // loading geometry nodes, transform nodes, etc...s
