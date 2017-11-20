@@ -40,6 +40,7 @@ var RigGeometry = function() {
     this._invMatrixFromSkeletonToGeometry = mat4.create();
 
     this._rigTransformImplementation = new RigTransformHardware();
+    this._geometry = undefined;
 
     // RigGeometry have a special stateset that will be pushed at the very end of the culling
     // this stateSet only represents animation (and shouldn't contain any rendering attributes)
