@@ -270,6 +270,12 @@ ReaderWriterGLTF.prototype = {
         }
     },
 
+    _processSkeleton: function(skinID) {
+        var skins = this._gltfJSON.skins;
+        var skin = skins[skinID];
+        var bones = skin.joints;
+    },
+
     _linkNodes: function(parent) {
         var nodes = this._gltfJSON.nodes;
         var children = parent.children;
@@ -562,6 +568,23 @@ ReaderWriterGLTF.prototype = {
             if (typeof values.diffuse !== 'string') osgMaterial.setDiffuse(values.diffuse);
             else return this.createTextureAndSetAttrib(values.diffuse, osgStateSet, 0);
         }
+    },
+
+    _findRootBones: function(skinID, roots) {
+        var skins = this._gltfJSON.skins;
+        var skin = skins[skinID];
+        if ( skin.skeleton !== undefined ) {
+            roots.push(skin.skeleton);
+            return;
+        }
+
+        var joints = skin.joints;
+        for (var j = 1; j < joints.length; j++) {
+            var joinID = joints[j];
+            if ( )
+            if (joints[j] )
+        }
+
     },
 
     loadSkins: function() {
