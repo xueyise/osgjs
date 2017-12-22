@@ -166,6 +166,20 @@ ReaderWriterGLTF.prototype = {
         this._inputReader = new Input();
     },
 
+    // add parents to all nodes because it's easier later
+    // espacially on skinning
+    _addParentToNodes: function() {
+        var nodes = this._gltfJSON.nodes;
+        for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i];
+            var children = node.children;
+            for (var j = 0; j < children.length; j++) {
+                var child = children[j];
+                child.parent = i;
+            }
+        }
+    },
+
     loadBuffers: P.method(function() {
         var promises = [];
         var buffers = this._gltfJSON.buffers;
@@ -272,8 +286,15 @@ ReaderWriterGLTF.prototype = {
 
     _processSkeleton: function(skinID) {
         var skins = this._gltfJSON.skins;
+        var nodes = this._gltfJSON.nodes;
         var skin = skins[skinID];
         var bones = skin.joints;
+        var roots = [];
+        this._findRootBones(skinID, roots);
+        var skeleton = new Skeleton();
+        for (var i = 0; i < roots.length; i++) {
+            skeleton.addChild(nodes[roots[i]]);
+        }
     },
 
     _linkNodes: function(parent) {
@@ -570,37 +591,182 @@ ReaderWriterGLTF.prototype = {
         }
     },
 
-    _findRootBones: function(skinID, roots) {
-        var skins = this._gltfJSON.skins;
-        var skin = skins[skinID];
-        if ( skin.skeleton !== undefined ) {
-            roots.push(skin.skeleton);
-            return;
+    // return an array with node path from root to nodeID
+    _getNodePath: function(childNodeID) {
+        var nodes = this._gltfJSON.nodes;
+        var nodeID = childNodeID;
+        var nodePath = [];
+        while (nodeID !== undefined) {
+            nodePath.push(nodeID);
+            nodeID = nodes[nodeID].parent;
         }
-
-        var joints = skin.joints;
-        for (var j = 1; j < joints.length; j++) {
-            var joinID = joints[j];
-            if ( )
-            if (joints[j] )
-        }
-
+        return nodePath;
     },
 
+    _findNodeToInsertSkeleton: function(skinID) {
+        var skins = this._gltfJSON.skins;
+        var skin = skins[skinID];
+        var nodePath;
+        var result = {};
+        if (skin.skeleton !== undefined) {
+            nodePath = this._getNodePath(skin.skeleton);
+            result.nodePath = nodePath;
+            result.nodeID = skin.skeleton;
+            return result;
+        }
+
+        // get nodepath from root to this joint, then compare all nodepaths
+        // the common node is a node that is referenced in all nodepaths starting
+        // from joint to root
+        var nodePaths = [];
+        var joints = skin.joints;
+        var longestNodePath;
+        var maxNodePathNodes = 0;
+        for (var j = 0; j < joints.length; j++) {
+            nodePath = this._getNodePath(skin.skeleton);
+            if (nodePath.length > maxNodePathNodes) {
+                maxNodePathNodes = nodePath.length;
+                longestNodePath = nodePath;
+            }
+            nodePaths.push(this._getNodePath(joints[j]));
+        }
+
+        // search the node contained in all nodepaths from the longest nodepath
+        for (var i = 0; i < longestNodePath.length; i++) {
+            var nodeID = longestNodePath[i];
+            var isValid = true;
+            for (var k = 0; k < nodePaths.length; k++) {
+                nodePath = nodePaths[k];
+                if (nodePaths.index(nodeID) === -1) {
+                    isValid = false;
+                    break;
+                }
+            }
+            if (!isValid) continue;
+
+            result.nodePath = nodePath;
+            result.nodeID = nodeID;
+            return result;
+        }
+        return undefined;
+    },
+
+    _findRootBones: function(skinID) {
+        var skins = this._gltfJSON.skins;
+        var nodes = this._gltfJSON.nodes;
+        var skin = skins[skinID];
+        if (skin.skeleton !== undefined) {
+            return [skin.skeleton];
+        }
+
+        // get nodepath from root to this joint, then compare all nodepaths
+        // the common node is a node that is referenced in all nodepaths starting
+        // from joint to root
+        var joints = skin.joints;
+        var result = [];
+        for (var j = 0; j < joints.length; j++) {
+            var nodeID = joints[j];
+            var node = nodes[nodeID];
+            var parentID = node.parent;
+            if (parentID === undefined || joints.indexOf(parentID) === -1) {
+                result.push(nodeID);
+            }
+        }
+        return result;
+    },
+
+    /*
+    Different glTF skins can reference the same glTF node, but with different invBindMatrices.
+    We want no duplication, so we need to do some merge/transformations.
+
+    1- Generate a skeleton for each glTF skin, and add it to the graph. A 'distance from root'
+    is also computed to determine which skeleton is higher in the scene graph.
+
+    2- Look for intersection between skins (i.e two skins using at least one same node as joint) then:
+        a. shared joints: use the bone from the skin whose corresponding skeleton is higher in the scene graph
+        b. include joints from the skin having the lower skeleton to the skeleton of the other skin
+
+        Skin 1    Skin 2                Skeleton(skin 1, higher in the scene graph than skin2's skeleton)
+          3         5                       3
+          4         6          =>           4
+          5         7                       5
+                                            6*
+                                            7*
+    3- Compute merge matrices: used to offset invbinds when adding a glTF bone to a specific osg skeleton.
+    A merge matrix transforms a point from mesh space to skeleton space, and is used
+    to convert from glTF invbind (Bone->Mesh) to an OSG invBind (Bone->Skeleton)
+    */
     loadSkins: function() {
         var accessors = this._gltfJSON.accessors;
         var skins = this._gltfJSON.skins;
         var nodes = this._gltfJSON.nodes;
+        var skinResults = [];
+        // get all nodes path with parentNode to insert the skeleton
         for (var i = 0; i < skins.length; i++) {
-            var skin = skins[i];
-            nodes[skin.skeleton].osgjsSkeleton = new Skeleton();
-            for (var j = 1; j < skin.joints.length; j++) {
-                var nodeBoneIndex = skin.joints[j];
-                var inverseBindMatrixIndex = skin.inverseBindMatrices;
-                var bone = new Bone();
-                nodes[nodeBoneIndex].osgjsBone = bone;
-                var buffer = accessors[inverseBindMatrixIndex].data.getElements().buffer;
-                bone.setInvBindMatrixInSkeletonSpace(new Float32Array(buffer, 16 * 4 * j, 16));
+            var skinID = skins[i];
+            var skeleton = this._processSkin(skinID);
+
+            // result contains {
+            //   nodePath: [nodeID, nodeID, ...]
+            //   nodeID: parentID
+            // }
+            var skinResult = this._findNodeToInsertSkeleton(i);
+            if (!skinResult) console.error('loadSkins: the impossible happened');
+            skinResults.push(skinResults);
+        }
+
+        // TODO check if there are joints interesection between skins and handle this case
+        // but later
+
+        //this._skeleton[]
+        // nodes[skin.skeleton].osgjsSkeleton = new Skeleton();
+        //     for (var j = 1; j < skin.joints.length; j++) {
+        //         var nodeBoneIndex = skin.joints[j];
+        //         var inverseBindMatrixIndex = skin.inverseBindMatrices;
+        //         var bone = new Bone();
+        //         nodes[nodeBoneIndex].osgjsBone = bone;
+        //         var buffer = accessors[inverseBindMatrixIndex].data.getElements().buffer;
+        //         bone.setInvBindMatrixInSkeletonSpace(new Float32Array(buffer, 16 * 4 * j, 16));
+        //     }
+        // }
+    },
+
+    _createBone: function(nodeID) {
+        var nodes = this._gltfJSON.nodes;
+        var node = nodes[nodeID];
+        var bone = new Bone();
+        if (node.name) bone.setName(node.name);
+        var matrix = this._computeNodeMatrix(nodeID);
+        bone.setMatrix(matrix);
+        return bone;
+    },
+
+    _processSkin: function(skinID) {
+        var skins = this._gltfJSON.skins;
+        var nodes = this._gltfJSON.nodes;
+        var skin = skins[skinID];
+        var skeleton = new Skeleton();
+        skeleton.setName('skin ID ' + skinID );
+        var nodeID;
+        var boneMap = {};
+        var node;
+        var bone;
+        // first create all bones
+        for (var i = 0; i < skin.children; i++) {
+            nodeID = skin.children[i];
+            bone = this._createBone(nodeID);
+            boneMap[nodeID] = bone;
+        }
+
+        for ( var boneID in boneMap ) {
+            node = nodes[boneID];
+            var parentID = node.parent;
+            bone = boneMap[boneID];
+            if (parentID === undefined || skin.children.indexOf(parentID) === -1) {
+                skeleton.addChild(bone);
+            } else {
+                var boneParent = boneMap[parentID];
+                boneParent.addChild(bone);
             }
         }
     },
@@ -1416,6 +1582,7 @@ ReaderWriterGLTF.prototype = {
             function() {
                 this.loadBufferViews();
                 this.loadAccessors();
+                this._addParentsToNodes();
                 this.loadAnimations();
                 this.loadSkins();
                 this.loadMeshes();
